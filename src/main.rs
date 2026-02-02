@@ -6,7 +6,10 @@
 // model works here, get those concepts clear and read the xml file, then it will be easy for you to go through this code
 // otherwise honestly nothing will make sense here trust me
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, mpsc::Receiver, mpsc::Sender, mpsc::channel},
+};
 
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, WEnum,
@@ -20,7 +23,8 @@ use wayland_protocols_wlr::output_management::v1::client::{
 
 #[derive(Debug)]
 struct Mode {
-    mode_id: ObjectId,
+    id: ObjectId,
+    monitor_id: ObjectId,
     mhz: i32,
     height: i32,
     width: i32,
@@ -29,7 +33,8 @@ struct Mode {
 impl Default for Mode {
     fn default() -> Self {
         Self {
-            mode_id: ObjectId::null(),
+            id: ObjectId::null(),
+            monitor_id: ObjectId::null(),
             mhz: Default::default(),
             height: Default::default(),
             width: Default::default(),
@@ -39,6 +44,7 @@ impl Default for Mode {
 
 #[derive(Debug)]
 struct Monitor {
+    id: ObjectId,
     name: String,
     modes: Vec<Mode>,
     enabled: bool,
@@ -52,6 +58,7 @@ struct Monitor {
 impl Default for Monitor {
     fn default() -> Self {
         Self {
+            id: ObjectId::null(),
             name: String::new(),
             modes: Vec::new(),
             enabled: false,
@@ -65,7 +72,44 @@ impl Default for Monitor {
 }
 
 #[derive(Debug)]
+struct WlMonitorResolution {
+    height: i32,
+    width: i32,
+}
+
+#[derive(Debug)]
+struct WlMonitorPosition {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug)]
+struct WlMonitorMode {
+    id: ObjectId,
+    monitor_id: ObjectId,
+    refresh_rate: i32,
+    resolution: WlMonitorResolution,
+}
+
+#[derive(Debug)]
+struct WlMonitor {
+    id: ObjectId,
+    name: String,
+    enabled: bool,
+    refresh_rate: i32,
+    resolution: WlMonitorResolution,
+    position: WlMonitorPosition,
+    mode: Vec<WlMonitorMode>,
+}
+
+#[derive(Debug)]
+enum EventEmit {
+    Initiate(WlMonitor),
+}
+
+#[derive(Debug)]
 struct AppState {
+    emit: Sender<EventEmit>,
     monitor_hash_map: HashMap<ObjectId, Monitor>,
     mode_monitor_hash_map: HashMap<ObjectId, ObjectId>,
 }
@@ -109,19 +153,67 @@ impl Dispatch<zwlr_output_manager_v1::ZwlrOutputManagerV1, ()> for AppState {
     ) {
         match event {
             zwlr_output_manager_v1::Event::Head { head } => {
-                state.monitor_hash_map.insert(head.id(), Monitor::default());
+                state.monitor_hash_map.insert(
+                    head.id(),
+                    Monitor {
+                        id: head.id(),
+                        ..Default::default()
+                    },
+                );
             }
             zwlr_output_manager_v1::Event::Done { serial: _ } => {
                 for monitor in state.monitor_hash_map.values() {
-                    let status = if monitor.enabled { "on" } else { "off" };
-                    println!("{} ({}) @ {},{}", monitor.name, status, monitor.position_x, monitor.position_y);
-                    for mode in &monitor.modes {
-                        let refresh = mode.mhz as f64 / 1000.0;
-                        let current = monitor.mode.as_ref().map(|m| m.id() == mode.mode_id).unwrap_or(false);
-                        let marker = if current { "*" } else { " " };
-                        println!("  {} {}x{} @ {:.0}Hz", marker, mode.width, mode.height, refresh);
-                    }
-                    println!();
+                    let active_mode = monitor
+                        .mode
+                        .as_ref()
+                        .and_then(|m| monitor.modes.iter().find(|mode| mode.id == m.id()));
+
+                    let (active_refresh_rate, active_resolution) = active_mode
+                        .map(|m| {
+                            (
+                                m.mhz,
+                                WlMonitorResolution {
+                                    height: m.height,
+                                    width: m.width,
+                                },
+                            )
+                        })
+                        .unwrap_or((
+                            0,
+                            WlMonitorResolution {
+                                height: 0,
+                                width: 0,
+                            },
+                        ));
+
+                    let wl_modes: Vec<WlMonitorMode> = monitor
+                        .modes
+                        .iter()
+                        .map(|m| WlMonitorMode {
+                            id: m.id.clone(),
+                            monitor_id: m.monitor_id.clone(),
+                            refresh_rate: m.mhz,
+                            resolution: WlMonitorResolution {
+                                height: m.height,
+                                width: m.width,
+                            },
+                        })
+                        .collect();
+
+                    let wl_monitor = WlMonitor {
+                        id: monitor.id.clone(),
+                        name: monitor.name.clone(),
+                        enabled: monitor.enabled,
+                        refresh_rate: active_refresh_rate,
+                        resolution: active_resolution,
+                        position: WlMonitorPosition {
+                            x: monitor.position_x,
+                            y: monitor.position_y,
+                        },
+                        mode: wl_modes,
+                    };
+
+                    let _ = state.emit.send(EventEmit::Initiate(wl_monitor));
                 }
             }
             _ => {}
@@ -158,7 +250,8 @@ impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for AppState {
         if let zwlr_output_head_v1::Event::Mode { mode } = &event {
             state.mode_monitor_hash_map.insert(mode.id(), head_id);
             monitor.modes.push(Mode {
-                mode_id: mode.id(),
+                id: mode.id(),
+                monitor_id: monitor.id.clone(),
                 ..Default::default()
             });
             return;
@@ -214,17 +307,16 @@ impl Dispatch<zwlr_output_mode_v1::ZwlrOutputModeV1, ()> for AppState {
         let Some(monitor) = get_monitor_by_mode_id(state, &mode_id) else {
             return;
         };
-        let Some(mode) = monitor.modes.iter_mut().find(|m| m.mode_id == mode_id) else {
+        let Some(mode) = monitor.modes.iter_mut().find(|m| m.id == mode_id) else {
             return;
         };
-
         match event {
             zwlr_output_mode_v1::Event::Size { height, width } => {
                 mode.height = height;
                 mode.width = width;
             }
             zwlr_output_mode_v1::Event::Refresh { refresh } => {
-                mode.mhz = refresh;
+                mode.mhz = refresh / 1000;
             }
             _ => {}
         }
@@ -247,10 +339,14 @@ fn get_monitor_by_mode_id<'a>(
 }
 
 fn main() {
+    let (tx, rx): (Sender<EventEmit>, Receiver<EventEmit>) = channel();
+
     let mut state = AppState {
+        emit: tx,
         monitor_hash_map: HashMap::new(),
         mode_monitor_hash_map: HashMap::new(),
     };
+
     let conn = Connection::connect_to_env().expect("error: failed to connect to wayland server");
     let display_object = conn.display();
     let mut event_queue: EventQueue<AppState> = conn.new_event_queue();
@@ -263,5 +359,27 @@ fn main() {
         event_queue
             .blocking_dispatch(&mut state)
             .expect("error: failed to start the dispacth pending event");
+
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EventEmit::Initiate(monitor) => {
+                    println!("\n=== Monitor: {} ===", monitor.name);
+                    println!("ID: {}", monitor.id);
+                    println!("Enabled: {}", monitor.enabled);
+                    println!("Position: ({}, {})", monitor.position.x, monitor.position.y);
+                    println!(
+                        "Active: {}x{} @ {}Hz",
+                        monitor.resolution.width, monitor.resolution.height, monitor.refresh_rate
+                    );
+                    println!("Available modes:");
+                    for mode in &monitor.mode {
+                        println!(
+                            "  - {}x{} @ {}Hz",
+                            mode.resolution.width, mode.resolution.height, mode.refresh_rate
+                        );
+                    }
+                }
+            }
+        }
     }
 }

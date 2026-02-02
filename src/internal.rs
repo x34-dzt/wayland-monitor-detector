@@ -8,7 +8,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{mpsc::Sender, Arc},
+    sync::{Arc, mpsc::Sender},
 };
 
 use wayland_client::{
@@ -50,12 +50,10 @@ pub(crate) struct Monitor {
     name: String,
     modes: Vec<Mode>,
     enabled: bool,
-    #[allow(dead_code)]
     scale: f64,
     position_x: i32,
     position_y: i32,
     mode: Option<ZwlrOutputModeV1>,
-    #[allow(dead_code)]
     transform: WEnum<Transform>,
 }
 

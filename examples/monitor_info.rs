@@ -1,3 +1,5 @@
+//! Example showing how to use wl_monitor_detector library to get monitor information
+
 use wl_monitor_detector::{MonitorDetector, MonitorEvent};
 
 fn main() {

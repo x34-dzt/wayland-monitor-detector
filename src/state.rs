@@ -27,9 +27,17 @@ pub enum WlMonitorEvent {
     Removed { id: ObjectId, name: String },
 }
 
-enum WlMonitorAction {
-    Toggle,
-    SwitchMode,
+pub enum WlMonitorAction {
+    Toggle { name: String },
+    SwitchMode { name: String, width: i32, height: i32, refresh_rate: i32 },
+}
+
+#[derive(Debug, PartialEq)]
+enum ConfigResult {
+    Idle,
+    Succeeded,
+    Failed,
+    Cancelled,
 }
 
 pub struct WlMonitorManager {
@@ -41,6 +49,7 @@ pub struct WlMonitorManager {
     zwlr_manager: Option<ZwlrOutputManagerV1>,
     serial: Option<u32>,
     initialized: bool,
+    config_result: ConfigResult,
 }
 
 enum WlMonitorManagerError {
@@ -71,6 +80,7 @@ impl WlMonitorManager {
             zwlr_manager: None,
             serial: None,
             initialized: false,
+            config_result: ConfigResult::Idle,
         };
 
         Ok((state, event_queue))
@@ -84,6 +94,159 @@ impl WlMonitorManager {
             eq.blocking_dispatch(self).map_err(|e| {
                 WlMonitorManagerError::EventQueueError(e.to_string())
             })?;
+            self.flush_changed();
+
+            if let Ok(action) = self.controller.try_recv() {
+                self.handle_action(action, &mut eq)?;
+            }
+        }
+    }
+
+    fn flush_changed(&mut self) {
+        if !self.initialized {
+            return;
+        }
+        for monitor in self.monitors.values_mut() {
+            if monitor.changed {
+                monitor.changed = false;
+                let _ = self.emitter.send(WlMonitorEvent::Changed(monitor.clone()));
+            }
+        }
+    }
+
+    fn handle_action(
+        &mut self,
+        action: WlMonitorAction,
+        eq: &mut EventQueue<Self>,
+    ) -> Result<(), WlMonitorManagerError> {
+        let serial = self.serial.ok_or_else(|| {
+            WlMonitorManagerError::EventQueueError("no serial available".into())
+        })?;
+        let manager = self.zwlr_manager.as_ref().ok_or_else(|| {
+            WlMonitorManagerError::EventQueueError("no manager available".into())
+        })?;
+
+        let qh = eq.handle();
+        let config = manager.create_configuration(serial, &qh, ());
+
+        match action {
+            WlMonitorAction::Toggle { ref name } => {
+                self.configure_toggle(&config, name, &qh);
+            }
+            WlMonitorAction::SwitchMode { ref name, width, height, refresh_rate } => {
+                self.configure_switch_mode(&config, name, width, height, refresh_rate, &qh);
+            }
+        }
+
+        config.apply();
+        self.wait_for_result(eq)?;
+        config.destroy();
+
+        Ok(())
+    }
+
+    fn configure_toggle(
+        &self,
+        config: &ZwlrOutputConfigurationV1,
+        name: &str,
+        qh: &QueueHandle<Self>,
+    ) {
+        let target_enabled = self.monitors.values()
+            .find(|m| m.name == name)
+            .map(|m| m.enabled)
+            .unwrap_or(false);
+
+        for monitor in self.monitors.values() {
+            if monitor.name == name {
+                if target_enabled {
+                    config.disable_head(&monitor.head);
+                } else {
+                    let config_head = config.enable_head(&monitor.head, qh, ());
+                    if let Some(mode) = monitor.modes.iter().find(|m| m.preferred)
+                        .or_else(|| monitor.modes.first())
+                    {
+                        config_head.set_mode(&mode.proxy);
+                    }
+                }
+            } else {
+                self.preserve_head(config, monitor, qh);
+            }
+        }
+    }
+
+    fn configure_switch_mode(
+        &self,
+        config: &ZwlrOutputConfigurationV1,
+        name: &str,
+        width: i32,
+        height: i32,
+        refresh_rate: i32,
+        qh: &QueueHandle<Self>,
+    ) {
+        for monitor in self.monitors.values() {
+            if monitor.name == name {
+                let config_head = config.enable_head(&monitor.head, qh, ());
+                if let Some(mode) = monitor.modes.iter().find(|m| {
+                    m.resolution.width == width
+                        && m.resolution.height == height
+                        && m.refresh_rate == refresh_rate
+                }) {
+                    config_head.set_mode(&mode.proxy);
+                }
+                if monitor.enabled {
+                    config_head.set_position(monitor.position.x, monitor.position.y);
+                    if let WEnum::Value(t) = monitor.transform {
+                        config_head.set_transform(t);
+                    }
+                    config_head.set_scale(monitor.scale);
+                }
+            } else {
+                self.preserve_head(config, monitor, qh);
+            }
+        }
+    }
+
+    fn preserve_head(
+        &self,
+        config: &ZwlrOutputConfigurationV1,
+        monitor: &WlMonitor,
+        qh: &QueueHandle<Self>,
+    ) {
+        if monitor.enabled {
+            let config_head = config.enable_head(&monitor.head, qh, ());
+            if let Some(ref current_mode) = monitor.current_mode {
+                config_head.set_mode(current_mode);
+            }
+            config_head.set_position(monitor.position.x, monitor.position.y);
+            if let WEnum::Value(t) = monitor.transform {
+                config_head.set_transform(t);
+            }
+            config_head.set_scale(monitor.scale);
+        } else {
+            config.disable_head(&monitor.head);
+        }
+    }
+
+    fn wait_for_result(
+        &mut self,
+        eq: &mut EventQueue<Self>,
+    ) -> Result<(), WlMonitorManagerError> {
+        self.config_result = ConfigResult::Idle;
+        while self.config_result == ConfigResult::Idle {
+            eq.blocking_dispatch(self).map_err(|e| {
+                WlMonitorManagerError::EventQueueError(e.to_string())
+            })?;
+            self.flush_changed();
+        }
+        match self.config_result {
+            ConfigResult::Succeeded => Ok(()),
+            ConfigResult::Failed => Err(WlMonitorManagerError::EventQueueError(
+                "compositor rejected the configuration".into(),
+            )),
+            ConfigResult::Cancelled => Err(WlMonitorManagerError::EventQueueError(
+                "configuration cancelled (serial outdated)".into(),
+            )),
+            ConfigResult::Idle => unreachable!(),
         }
     }
 }
@@ -136,8 +299,9 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for WlMonitorManager {
                         scale: 1.0,
                         enabled: false,
                         current_mode: None,
+                        transform: WEnum::Value(Transform::Normal),
                         head,
-                        dirty: false,
+                        changed: false,
                     },
                 );
             }
@@ -231,11 +395,14 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for WlMonitorManager {
             zwlr_output_head_v1::Event::Scale { scale } => {
                 monitor.scale = scale;
             }
+            zwlr_output_head_v1::Event::Transform { transform } => {
+                monitor.transform = transform;
+            }
             _ => {}
         }
 
         if state.initialized {
-            monitor.dirty = true;
+            monitor.changed = true;
         }
     }
 
@@ -287,14 +454,25 @@ impl Dispatch<ZwlrOutputModeV1, ()> for WlMonitorManager {
 
 impl Dispatch<ZwlrOutputConfigurationV1, ()> for WlMonitorManager {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         _: &ZwlrOutputConfigurationV1,
-        _event: zwlr_output_configuration_v1::Event,
+        event: zwlr_output_configuration_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // TODO: handle config result when implementing toggle/switch
+        match event {
+            zwlr_output_configuration_v1::Event::Succeeded => {
+                state.config_result = ConfigResult::Succeeded;
+            }
+            zwlr_output_configuration_v1::Event::Failed => {
+                state.config_result = ConfigResult::Failed;
+            }
+            zwlr_output_configuration_v1::Event::Cancelled => {
+                state.config_result = ConfigResult::Cancelled;
+            }
+            _ => {}
+        }
     }
 }
 

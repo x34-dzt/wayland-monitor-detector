@@ -1,4 +1,4 @@
-use wayland_client::backend::ObjectId;
+use wayland_client::{WEnum, backend::ObjectId, protocol::wl_output::Transform};
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_head_v1::ZwlrOutputHeadV1,
     zwlr_output_mode_v1::ZwlrOutputModeV1,
@@ -40,6 +40,7 @@ pub struct WlMonitor {
     pub scale: f64,
     pub enabled: bool,
     pub current_mode: Option<ZwlrOutputModeV1>,
+    pub transform: WEnum<Transform>,
     pub head: ZwlrOutputHeadV1,
-    pub dirty: bool,
+    pub changed: bool,
 }

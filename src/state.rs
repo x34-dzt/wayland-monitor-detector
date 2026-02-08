@@ -1,0 +1,489 @@
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        mpsc::{Receiver, SyncSender},
+    },
+};
+
+use wayland_client::{
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
+    backend::ObjectId,
+    protocol::{wl_output::Transform, wl_registry},
+};
+use wayland_protocols_wlr::output_management::v1::client::{
+    zwlr_output_configuration_head_v1::{self, ZwlrOutputConfigurationHeadV1},
+    zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
+    zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
+    zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
+    zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
+};
+
+use crate::wl_monitor::{WlMonitor, WlMonitorMode, WlPosition, WlResolution};
+
+pub enum WlMonitorEvent {
+    InitialState(Vec<WlMonitor>),
+    Changed(WlMonitor),
+    Removed { id: ObjectId, name: String },
+}
+
+pub enum WlMonitorAction {
+    Toggle { name: String },
+    SwitchMode { name: String, width: i32, height: i32, refresh_rate: i32 },
+}
+
+#[derive(Debug, PartialEq)]
+enum ConfigResult {
+    Idle,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+pub struct WlMonitorManager {
+    conn: Connection,
+    emitter: SyncSender<WlMonitorEvent>,
+    monitors: HashMap<ObjectId, WlMonitor>,
+    mode_monitor: HashMap<ObjectId, ObjectId>,
+    controller: Receiver<WlMonitorAction>,
+    zwlr_manager: Option<ZwlrOutputManagerV1>,
+    serial: Option<u32>,
+    initialized: bool,
+    config_result: ConfigResult,
+}
+
+enum WlMonitorManagerError {
+    ConnectionError(String),
+    EventQueueError(String),
+}
+
+impl WlMonitorManager {
+    fn new_connection(
+        emitter: SyncSender<WlMonitorEvent>,
+        controller: Receiver<WlMonitorAction>,
+    ) -> Result<(Self, EventQueue<Self>), WlMonitorManagerError> {
+        let conn = Connection::connect_to_env().map_err(|e| {
+            WlMonitorManagerError::ConnectionError(e.to_string())
+        })?;
+
+        let display_object = conn.display();
+        let event_queue: EventQueue<WlMonitorManager> = conn.new_event_queue();
+        let queue_handler = event_queue.handle();
+        display_object.get_registry(&queue_handler, ());
+
+        let state = WlMonitorManager {
+            conn,
+            emitter,
+            monitors: HashMap::new(),
+            mode_monitor: HashMap::new(),
+            controller,
+            zwlr_manager: None,
+            serial: None,
+            initialized: false,
+            config_result: ConfigResult::Idle,
+        };
+
+        Ok((state, event_queue))
+    }
+
+    fn run(
+        &mut self,
+        mut eq: EventQueue<Self>,
+    ) -> Result<(), WlMonitorManagerError> {
+        loop {
+            eq.blocking_dispatch(self).map_err(|e| {
+                WlMonitorManagerError::EventQueueError(e.to_string())
+            })?;
+            self.flush_changed();
+
+            if let Ok(action) = self.controller.try_recv() {
+                self.handle_action(action, &mut eq)?;
+            }
+        }
+    }
+
+    fn flush_changed(&mut self) {
+        if !self.initialized {
+            return;
+        }
+        for monitor in self.monitors.values_mut() {
+            if monitor.changed {
+                monitor.changed = false;
+                let _ = self.emitter.send(WlMonitorEvent::Changed(monitor.clone()));
+            }
+        }
+    }
+
+    fn handle_action(
+        &mut self,
+        action: WlMonitorAction,
+        eq: &mut EventQueue<Self>,
+    ) -> Result<(), WlMonitorManagerError> {
+        let serial = self.serial.ok_or_else(|| {
+            WlMonitorManagerError::EventQueueError("no serial available".into())
+        })?;
+        let manager = self.zwlr_manager.as_ref().ok_or_else(|| {
+            WlMonitorManagerError::EventQueueError("no manager available".into())
+        })?;
+
+        let qh = eq.handle();
+        let config = manager.create_configuration(serial, &qh, ());
+
+        match action {
+            WlMonitorAction::Toggle { ref name } => {
+                self.configure_toggle(&config, name, &qh);
+            }
+            WlMonitorAction::SwitchMode { ref name, width, height, refresh_rate } => {
+                self.configure_switch_mode(&config, name, width, height, refresh_rate, &qh);
+            }
+        }
+
+        config.apply();
+        self.wait_for_result(eq)?;
+        config.destroy();
+
+        Ok(())
+    }
+
+    fn configure_toggle(
+        &self,
+        config: &ZwlrOutputConfigurationV1,
+        name: &str,
+        qh: &QueueHandle<Self>,
+    ) {
+        let target_enabled = self.monitors.values()
+            .find(|m| m.name == name)
+            .map(|m| m.enabled)
+            .unwrap_or(false);
+
+        for monitor in self.monitors.values() {
+            if monitor.name == name {
+                if target_enabled {
+                    config.disable_head(&monitor.head);
+                } else {
+                    let config_head = config.enable_head(&monitor.head, qh, ());
+                    if let Some(mode) = monitor.modes.iter().find(|m| m.preferred)
+                        .or_else(|| monitor.modes.first())
+                    {
+                        config_head.set_mode(&mode.proxy);
+                    }
+                }
+            } else {
+                self.preserve_head(config, monitor, qh);
+            }
+        }
+    }
+
+    fn configure_switch_mode(
+        &self,
+        config: &ZwlrOutputConfigurationV1,
+        name: &str,
+        width: i32,
+        height: i32,
+        refresh_rate: i32,
+        qh: &QueueHandle<Self>,
+    ) {
+        for monitor in self.monitors.values() {
+            if monitor.name == name {
+                let config_head = config.enable_head(&monitor.head, qh, ());
+                if let Some(mode) = monitor.modes.iter().find(|m| {
+                    m.resolution.width == width
+                        && m.resolution.height == height
+                        && m.refresh_rate == refresh_rate
+                }) {
+                    config_head.set_mode(&mode.proxy);
+                }
+                if monitor.enabled {
+                    config_head.set_position(monitor.position.x, monitor.position.y);
+                    if let WEnum::Value(t) = monitor.transform {
+                        config_head.set_transform(t);
+                    }
+                    config_head.set_scale(monitor.scale);
+                }
+            } else {
+                self.preserve_head(config, monitor, qh);
+            }
+        }
+    }
+
+    fn preserve_head(
+        &self,
+        config: &ZwlrOutputConfigurationV1,
+        monitor: &WlMonitor,
+        qh: &QueueHandle<Self>,
+    ) {
+        if monitor.enabled {
+            let config_head = config.enable_head(&monitor.head, qh, ());
+            if let Some(ref current_mode) = monitor.current_mode {
+                config_head.set_mode(current_mode);
+            }
+            config_head.set_position(monitor.position.x, monitor.position.y);
+            if let WEnum::Value(t) = monitor.transform {
+                config_head.set_transform(t);
+            }
+            config_head.set_scale(monitor.scale);
+        } else {
+            config.disable_head(&monitor.head);
+        }
+    }
+
+    fn wait_for_result(
+        &mut self,
+        eq: &mut EventQueue<Self>,
+    ) -> Result<(), WlMonitorManagerError> {
+        self.config_result = ConfigResult::Idle;
+        while self.config_result == ConfigResult::Idle {
+            eq.blocking_dispatch(self).map_err(|e| {
+                WlMonitorManagerError::EventQueueError(e.to_string())
+            })?;
+            self.flush_changed();
+        }
+        match self.config_result {
+            ConfigResult::Succeeded => Ok(()),
+            ConfigResult::Failed => Err(WlMonitorManagerError::EventQueueError(
+                "compositor rejected the configuration".into(),
+            )),
+            ConfigResult::Cancelled => Err(WlMonitorManagerError::EventQueueError(
+                "configuration cancelled (serial outdated)".into(),
+            )),
+            ConfigResult::Idle => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for WlMonitorManager {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+            && interface == ZwlrOutputManagerV1::interface().name
+        {
+            let bound = registry.bind::<ZwlrOutputManagerV1, _, _>(name, version, qh, ());
+            state.zwlr_manager = Some(bound);
+        }
+    }
+}
+
+impl Dispatch<ZwlrOutputManagerV1, ()> for WlMonitorManager {
+    fn event(
+        state: &mut Self,
+        _: &ZwlrOutputManagerV1,
+        event: zwlr_output_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_output_manager_v1::Event::Head { head } => {
+                state.monitors.insert(
+                    head.id(),
+                    WlMonitor {
+                        head_id: head.id(),
+                        name: String::new(),
+                        description: String::new(),
+                        make: String::new(),
+                        model: String::new(),
+                        serial_number: String::new(),
+                        modes: Vec::new(),
+                        resolution: WlResolution::default(),
+                        position: WlPosition::default(),
+                        scale: 1.0,
+                        enabled: false,
+                        current_mode: None,
+                        transform: WEnum::Value(Transform::Normal),
+                        head,
+                        changed: false,
+                    },
+                );
+            }
+            zwlr_output_manager_v1::Event::Done { serial } => {
+                state.serial = Some(serial);
+                if !state.initialized {
+                    state.initialized = true;
+                    let monitors = state.monitors.values().cloned().collect();
+                    let _ = state.emitter.send(WlMonitorEvent::InitialState(monitors));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn event_created_child(
+        opcode: u16,
+        qh: &QueueHandle<Self>,
+    ) -> Arc<dyn wayland_client::backend::ObjectData> {
+        if opcode == 0 {
+            qh.make_data::<ZwlrOutputHeadV1, _>(())
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+impl Dispatch<ZwlrOutputHeadV1, ()> for WlMonitorManager {
+    fn event(
+        state: &mut Self,
+        head: &ZwlrOutputHeadV1,
+        event: <ZwlrOutputHeadV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let head_id = head.id();
+
+        if let zwlr_output_head_v1::Event::Finished = &event {
+            if let Some(monitor) = state.monitors.remove(&head_id) {
+                let _ = state.emitter.send(WlMonitorEvent::Removed {
+                    id: monitor.head_id,
+                    name: monitor.name,
+                });
+            }
+            return;
+        }
+
+        let Some(monitor) = state.monitors.get_mut(&head_id) else {
+            return;
+        };
+
+        if let zwlr_output_head_v1::Event::Mode { mode } = &event {
+            state.mode_monitor.insert(mode.id(), head_id);
+            monitor.modes.push(WlMonitorMode {
+                mode_id: mode.id(),
+                head_id: monitor.head_id.clone(),
+                refresh_rate: 0,
+                resolution: WlResolution::default(),
+                preferred: false,
+                proxy: mode.clone(),
+            });
+            return;
+        }
+
+        match event {
+            zwlr_output_head_v1::Event::Name { name } => {
+                monitor.name = name;
+            }
+            zwlr_output_head_v1::Event::Description { description } => {
+                monitor.description = description;
+            }
+            zwlr_output_head_v1::Event::Make { make } => {
+                monitor.make = make;
+            }
+            zwlr_output_head_v1::Event::Model { model } => {
+                monitor.model = model;
+            }
+            zwlr_output_head_v1::Event::SerialNumber { serial_number } => {
+                monitor.serial_number = serial_number;
+            }
+            zwlr_output_head_v1::Event::Enabled { enabled } => {
+                monitor.enabled = enabled != 0;
+            }
+            zwlr_output_head_v1::Event::CurrentMode { mode } => {
+                monitor.current_mode = Some(mode);
+            }
+            zwlr_output_head_v1::Event::Position { x, y } => {
+                monitor.position = WlPosition { x, y };
+            }
+            zwlr_output_head_v1::Event::Scale { scale } => {
+                monitor.scale = scale;
+            }
+            zwlr_output_head_v1::Event::Transform { transform } => {
+                monitor.transform = transform;
+            }
+            _ => {}
+        }
+
+        if state.initialized {
+            monitor.changed = true;
+        }
+    }
+
+    fn event_created_child(
+        opcode: u16,
+        qh: &QueueHandle<Self>,
+    ) -> Arc<dyn wayland_client::backend::ObjectData> {
+        if opcode == 3 {
+            qh.make_data::<ZwlrOutputModeV1, _>(())
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+impl Dispatch<ZwlrOutputModeV1, ()> for WlMonitorManager {
+    fn event(
+        state: &mut Self,
+        mode_obj: &ZwlrOutputModeV1,
+        event: <ZwlrOutputModeV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let mode_id = mode_obj.id();
+        let Some(monitor_id) = state.mode_monitor.get(&mode_id) else {
+            return;
+        };
+        let Some(monitor) = state.monitors.get_mut(monitor_id) else {
+            return;
+        };
+        let Some(mode) = monitor.modes.iter_mut().find(|m| m.mode_id == mode_id) else {
+            return;
+        };
+        match event {
+            zwlr_output_mode_v1::Event::Size { width, height } => {
+                mode.resolution = WlResolution { width, height };
+            }
+            zwlr_output_mode_v1::Event::Refresh { refresh } => {
+                mode.refresh_rate = refresh / 1000;
+            }
+            zwlr_output_mode_v1::Event::Preferred => {
+                mode.preferred = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrOutputConfigurationV1, ()> for WlMonitorManager {
+    fn event(
+        state: &mut Self,
+        _: &ZwlrOutputConfigurationV1,
+        event: zwlr_output_configuration_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_output_configuration_v1::Event::Succeeded => {
+                state.config_result = ConfigResult::Succeeded;
+            }
+            zwlr_output_configuration_v1::Event::Failed => {
+                state.config_result = ConfigResult::Failed;
+            }
+            zwlr_output_configuration_v1::Event::Cancelled => {
+                state.config_result = ConfigResult::Cancelled;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrOutputConfigurationHeadV1, ()> for WlMonitorManager {
+    fn event(
+        _: &mut Self,
+        _: &ZwlrOutputConfigurationHeadV1,
+        _event: zwlr_output_configuration_head_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}

@@ -21,20 +21,33 @@ use wayland_protocols_wlr::output_management::v1::client::{
 
 use crate::wl_monitor::{WlMonitor, WlMonitorMode, WlPosition, WlResolution};
 
+/// Events emitted by the Wayland monitor manager
+#[derive(Debug)]
 pub enum WlMonitorEvent {
+    /// Sent once when the initial state is received, containing all connected monitors
     InitialState(Vec<WlMonitor>),
-    Changed(WlMonitor),
+    /// Sent when a monitor's properties have changed
+    Changed(Box<WlMonitor>),
+    /// Sent when a monitor is disconnected
     Removed { id: ObjectId, name: String },
 }
 
+/// Actions that can be sent to the monitor manager to control monitors
 pub enum WlMonitorAction {
+    /// Toggle a monitor on/off by name
     Toggle {
+        /// Name of the monitor to toggle (e.g., "DP-1")
         name: String,
     },
+    /// Switch a monitor to a specific mode
     SwitchMode {
+        /// Name of the monitor to configure
         name: String,
+        /// Desired width in pixels
         width: i32,
+        /// Desired height in pixels
         height: i32,
+        /// Desired refresh rate in Hz
         refresh_rate: i32,
     },
 }
@@ -47,6 +60,10 @@ enum ConfigResult {
     Cancelled,
 }
 
+/// Manages Wayland monitor/output state and communication
+///
+/// This struct handles the connection to the Wayland display and provides
+/// an interface to receive monitor events and send control actions.
 pub struct WlMonitorManager {
     _conn: Connection,
     emitter: SyncSender<WlMonitorEvent>,
@@ -59,13 +76,40 @@ pub struct WlMonitorManager {
     config_result: ConfigResult,
 }
 
+/// Errors that can occur when using the monitor manager
 #[derive(Debug)]
 pub enum WlMonitorManagerError {
+    /// Failed to establish Wayland connection
     ConnectionError(String),
+    /// Error in the Wayland event queue
     EventQueueError(String),
 }
 
 impl WlMonitorManager {
+    /// Create a new Wayland connection and monitor manager
+    ///
+    /// Returns the manager and an event queue that must be dispatched to process events.
+    ///
+    /// # Arguments
+    ///
+    /// * `emitter` - Channel sender for receiving monitor events
+    /// * `controller` - Channel receiver for sending control actions
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConnectionError` if unable to connect to the Wayland display.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use wlx_monitors::{WlMonitorManager, WlMonitorEvent, WlMonitorAction};
+    /// use std::sync::mpsc::sync_channel;
+    ///
+    /// let (tx, rx) = sync_channel(10);
+    /// let (action_tx, action_rx) = sync_channel(10);
+    ///
+    /// let (manager, event_queue) = WlMonitorManager::new_connection(tx, action_rx).unwrap();
+    /// ```
     pub fn new_connection(
         emitter: SyncSender<WlMonitorEvent>,
         controller: Receiver<WlMonitorAction>,
@@ -94,6 +138,18 @@ impl WlMonitorManager {
         Ok((state, event_queue))
     }
 
+    /// Run the monitor manager event loop
+    ///
+    /// This will block and process events indefinitely, sending monitor events
+    /// through the emitter channel and receiving actions from the controller channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EventQueueError` if there's an error in the Wayland event queue.
+    ///
+    /// # Note
+    ///
+    /// This function runs indefinitely until an error occurs. Run it in a separate thread.
     pub fn run(
         mut self,
         mut eq: EventQueue<Self>,
@@ -133,8 +189,9 @@ impl WlMonitorManager {
         for monitor in self.monitors.values_mut() {
             if monitor.changed {
                 monitor.changed = false;
-                let _ =
-                    self.emitter.send(WlMonitorEvent::Changed(monitor.clone()));
+                let _ = self
+                    .emitter
+                    .send(WlMonitorEvent::Changed(Box::new(monitor.clone())));
             }
         }
     }

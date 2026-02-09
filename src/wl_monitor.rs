@@ -1,46 +1,77 @@
-use wayland_client::{WEnum, backend::ObjectId, protocol::wl_output::Transform};
+use wayland_client::{
+    WEnum, backend::ObjectId, protocol::wl_output::Transform,
+};
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_head_v1::ZwlrOutputHeadV1,
     zwlr_output_mode_v1::ZwlrOutputModeV1,
 };
 
-#[derive(Default, Clone)]
+/// Represents the resolution of a monitor mode
+#[derive(Default, Clone, Debug)]
 pub struct WlResolution {
+    /// Height in pixels
     pub height: i32,
+    /// Width in pixels
     pub width: i32,
 }
 
-#[derive(Default, Clone)]
+/// Represents the position of a monitor in the global coordinate space
+#[derive(Default, Clone, Debug)]
 pub struct WlPosition {
+    /// X coordinate
     pub x: i32,
+    /// Y coordinate
     pub y: i32,
 }
 
+/// Represents a display mode (resolution + refresh rate) for a monitor
 #[derive(Clone)]
 pub struct WlMonitorMode {
+    /// Internal Wayland object ID for this mode
     pub mode_id: ObjectId,
+    /// Internal Wayland object ID for the monitor head this mode belongs to
     pub head_id: ObjectId,
+    /// Refresh rate in Hz
     pub refresh_rate: i32,
+    /// Screen resolution
     pub resolution: WlResolution,
+    /// Whether this is the preferred mode for the monitor
     pub preferred: bool,
+    /// Internal Wayland proxy object for this mode
     pub proxy: ZwlrOutputModeV1,
 }
 
+/// Represents a connected monitor/display
 #[derive(Clone)]
 pub struct WlMonitor {
+    /// Internal Wayland object ID for the monitor head
     pub head_id: ObjectId,
+    /// Monitor name (e.g., "DP-1", "HDMI-A-1")
     pub name: String,
+    /// Human-readable description of the monitor
     pub description: String,
+    /// Manufacturer name
     pub make: String,
+    /// Model name
     pub model: String,
+    /// Serial number
     pub serial_number: String,
+    /// List of available display modes
     pub modes: Vec<WlMonitorMode>,
+    /// Current resolution
     pub resolution: WlResolution,
+    /// Current position in the global coordinate space
     pub position: WlPosition,
+    /// Current scale factor (e.g., 1.0, 1.5, 2.0)
     pub scale: f64,
+    /// Whether the monitor is currently enabled
     pub enabled: bool,
+    /// Currently active mode (if any)
     pub current_mode: Option<ZwlrOutputModeV1>,
+    /// Current transformation (normal, rotated, flipped, etc.)
     pub transform: WEnum<Transform>,
+    /// Internal Wayland head proxy object
     pub head: ZwlrOutputHeadV1,
+    /// Internal flag indicating if the monitor state has changed
     pub changed: bool,
 }

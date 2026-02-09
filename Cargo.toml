@@ -1,7 +1,14 @@
 [package]
-name = "wayland-monitor-detector"
+name = "wlx_monitors"
 version = "0.1.0"
 edition = "2024"
+authors = ["Your Name <your.email@example.com>"]
+description = "Wayland output manager using wlr-output-management protocol"
+license = "MIT"
+repository = "https://github.com/yourname/wlx_monitors"
+keywords = ["wayland", "monitor", "display", "wlroots", "output"]
+categories = ["api-bindings", "hardware-support"]
+rust-version = "1.85.0"
 
 [lib]
 name = "wlx_monitors"
@@ -15,3 +22,4 @@ path = "examples/monitor_info.rs"
 wayland-client = "0.31.12"
 wayland-protocols-wlr = {  version = "0.3.10", features = ["client"] }
 wayland-protocols = { version = "0.32.10", features = ["client"] }
+rustix = { version = "1", features = [ "event", "time" ] }

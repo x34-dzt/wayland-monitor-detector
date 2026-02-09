@@ -502,7 +502,6 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for WlMonitorManager {
             }
             zwlr_output_head_v1::Event::CurrentMode { mode } => {
                 monitor.current_mode = Some(mode.clone());
-                // Update is_current flag for all modes
                 for m in &mut monitor.modes {
                     m.is_current = m.mode_id == mode.id();
                 }

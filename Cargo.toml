@@ -2,7 +2,7 @@
 name = "wlx_monitors"
 version = "0.1.0"
 edition = "2024"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["x34-dzt"]
 description = "Wayland output manager using wlr-output-management protocol"
 license = "MIT"
 repository = "https://github.com/x34-dzt/wlx_monitors"

@@ -55,7 +55,7 @@ fn main() {
                 println!("=== removed: {} ===", name);
             }
             WlMonitorEvent::ActionFailed { action, reason } => {
-                eprintln!("Action failed: {}", action);
+                eprintln!("Action failed: {:?}", action);
                 eprintln!("Reason: {}", reason);
             }
         }

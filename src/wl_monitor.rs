@@ -89,6 +89,8 @@ pub struct WlMonitor {
     pub head: ZwlrOutputHeadV1,
     /// Internal flag indicating if the monitor state has changed
     pub changed: bool,
+    /// Stores the mode ID before the monitor was disabled
+    pub last_mode: Option<ObjectId>,
 }
 
 impl std::fmt::Debug for WlMonitor {
@@ -107,6 +109,7 @@ impl std::fmt::Debug for WlMonitor {
             .field("enabled", &self.enabled)
             .field("transform", &self.transform)
             .field("changed", &self.changed)
+            .field("last_mode", &self.last_mode)
             .finish_non_exhaustive()
     }
 }

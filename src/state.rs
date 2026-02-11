@@ -21,6 +21,14 @@ use wayland_protocols_wlr::output_management::v1::client::{
 
 use crate::wl_monitor::{WlMonitor, WlMonitorMode, WlPosition, WlResolution};
 
+/// The kind of action that failed
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionKind {
+    Toggle,
+    ConfigApply,
+    SwitchMode,
+}
+
 /// Events emitted by the Wayland monitor manager
 #[derive(Debug)]
 pub enum WlMonitorEvent {
@@ -30,6 +38,8 @@ pub enum WlMonitorEvent {
     Changed(Box<WlMonitor>),
     /// Sent when a monitor is disconnected
     Removed { id: ObjectId, name: String },
+    /// Sent when an action fails (e.g., invalid mode specified)
+    ActionFailed { action: ActionKind, reason: String },
 }
 
 /// Actions that can be sent to the monitor manager to control monitors
@@ -38,6 +48,8 @@ pub enum WlMonitorAction {
     Toggle {
         /// Name of the monitor to toggle (e.g., "DP-1")
         name: String,
+        /// Optional custom mode: (width, height, refresh_rate)
+        mode: Option<(i32, i32, i32)>,
     },
     /// Switch a monitor to a specific mode
     SwitchMode {
@@ -214,8 +226,8 @@ impl WlMonitorManager {
         let config = manager.create_configuration(serial, &qh, ());
 
         match action {
-            WlMonitorAction::Toggle { ref name } => {
-                self.configure_toggle(&config, name, &qh);
+            WlMonitorAction::Toggle { ref name, mode } => {
+                self.configure_toggle(&config, name, &qh, mode);
             }
             WlMonitorAction::SwitchMode {
                 ref name,
@@ -235,17 +247,26 @@ impl WlMonitorManager {
         }
 
         config.apply();
-        self.wait_for_result(eq)?;
+        match self.wait_for_result(eq) {
+            Ok(()) => {}
+            Err(e) => {
+                let _ = self.emitter.send(WlMonitorEvent::ActionFailed {
+                    action: ActionKind::ConfigApply,
+                    reason: format!("{:?}", e),
+                });
+            }
+        }
         config.destroy();
 
         Ok(())
     }
 
     fn configure_toggle(
-        &self,
+        &mut self,
         config: &ZwlrOutputConfigurationV1,
         name: &str,
         qh: &QueueHandle<Self>,
+        mode: Option<(i32, i32, i32)>,
     ) {
         let target_enabled = self
             .monitors
@@ -254,29 +275,67 @@ impl WlMonitorManager {
             .map(|m| m.enabled)
             .unwrap_or(false);
 
-        for monitor in self.monitors.values() {
-            if monitor.name == name {
-                if target_enabled {
-                    config.disable_head(&monitor.head);
-                } else {
-                    let config_head = config.enable_head(&monitor.head, qh, ());
-                    if let Some(mode) = monitor
-                        .modes
-                        .iter()
-                        .find(|m| m.preferred)
-                        .or_else(|| monitor.modes.first())
-                    {
-                        config_head.set_mode(&mode.proxy);
-                    }
+        // Save last_mode before the main loop so the mutable borrow is scoped separately
+        if target_enabled {
+            if let Some(monitor) =
+                self.monitors.values_mut().find(|m| m.name == name)
+            {
+                if let Some(current_mode) = &monitor.current_mode {
+                    monitor.last_mode = Some(current_mode.id());
                 }
-            } else {
+            }
+        }
+
+        for monitor in self.monitors.values() {
+            if monitor.name != name {
                 self.preserve_head(config, monitor, qh);
+                continue;
+            }
+
+            if target_enabled {
+                config.disable_head(&monitor.head);
+                continue;
+            }
+
+            let resolved_mode =
+                if let Some((width, height, refresh_rate)) = mode {
+                    monitor.modes.iter().find(|m| {
+                        m.resolution.width == width
+                            && m.resolution.height == height
+                            && m.refresh_rate == refresh_rate
+                    })
+                } else if let Some(last_mode) = &monitor.last_mode {
+                    monitor.modes.iter().find(|m| m.mode_id == *last_mode)
+                } else {
+                    None
+                };
+
+            let resolved_mode = resolved_mode
+                .or_else(|| monitor.modes.iter().find(|m| m.preferred))
+                .or_else(|| monitor.modes.first());
+
+            if let Some(target_mode) = resolved_mode {
+                let head = config.enable_head(&monitor.head, qh, ());
+                head.set_mode(&target_mode.proxy);
+                head.set_position(monitor.position.x, monitor.position.y);
+                if let WEnum::Value(t) = monitor.transform {
+                    head.set_transform(t);
+                }
+                head.set_scale(monitor.scale);
+            } else {
+                let _ = self.emitter.send(WlMonitorEvent::ActionFailed {
+                    action: ActionKind::Toggle,
+                    reason: format!(
+                        "No valid mode available for monitor '{}'",
+                        name
+                    ),
+                });
             }
         }
     }
 
     fn configure_switch_mode(
-        &self,
+        &mut self,
         config: &ZwlrOutputConfigurationV1,
         name: &str,
         width: i32,
@@ -285,25 +344,33 @@ impl WlMonitorManager {
         qh: &QueueHandle<Self>,
     ) {
         for monitor in self.monitors.values() {
-            if monitor.name == name {
+            if monitor.name != name {
+                self.preserve_head(config, monitor, qh);
+                continue;
+            }
+
+            if let Some(mode) = monitor.modes.iter().find(|m| {
+                m.resolution.width == width
+                    && m.resolution.height == height
+                    && m.refresh_rate == refresh_rate
+            }) {
                 let config_head = config.enable_head(&monitor.head, qh, ());
-                if let Some(mode) = monitor.modes.iter().find(|m| {
-                    m.resolution.width == width
-                        && m.resolution.height == height
-                        && m.refresh_rate == refresh_rate
-                }) {
-                    config_head.set_mode(&mode.proxy);
+                config_head.set_mode(&mode.proxy);
+                config_head
+                    .set_position(monitor.position.x, monitor.position.y);
+                if let WEnum::Value(t) = monitor.transform {
+                    config_head.set_transform(t);
                 }
-                if monitor.enabled {
-                    config_head
-                        .set_position(monitor.position.x, monitor.position.y);
-                    if let WEnum::Value(t) = monitor.transform {
-                        config_head.set_transform(t);
-                    }
-                    config_head.set_scale(monitor.scale);
-                }
+                config_head.set_scale(monitor.scale);
             } else {
                 self.preserve_head(config, monitor, qh);
+                let _ = self.emitter.send(WlMonitorEvent::ActionFailed {
+                    action: ActionKind::SwitchMode,
+                    reason: format!(
+                        "No matching mode {}x{}@{}Hz for monitor '{}'",
+                        width, height, refresh_rate, name
+                    ),
+                });
             }
         }
     }
@@ -413,6 +480,7 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for WlMonitorManager {
                         transform: WEnum::Value(Transform::Normal),
                         head,
                         changed: false,
+                        last_mode: None,
                     },
                 );
             }
@@ -420,6 +488,7 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for WlMonitorManager {
                 state.serial = Some(serial);
                 if !state.initialized {
                     state.initialized = true;
+
                     let monitors = state.monitors.values().cloned().collect();
                     let _ = state
                         .emitter
@@ -455,6 +524,7 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for WlMonitorManager {
 
         if let zwlr_output_head_v1::Event::Finished = &event {
             if let Some(monitor) = state.monitors.remove(&head_id) {
+                state.mode_monitor.retain(|_, head| *head != head_id);
                 let _ = state.emitter.send(WlMonitorEvent::Removed {
                     id: monitor.head_id,
                     name: monitor.name,
@@ -498,7 +568,7 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for WlMonitorManager {
                 monitor.serial_number = serial_number;
             }
             zwlr_output_head_v1::Event::Enabled { enabled } => {
-                monitor.enabled = enabled != 0;
+                monitor.enabled = enabled != 0
             }
             zwlr_output_head_v1::Event::CurrentMode { mode } => {
                 monitor.current_mode = Some(mode.clone());

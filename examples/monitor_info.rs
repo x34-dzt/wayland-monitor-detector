@@ -52,7 +52,11 @@ fn main() {
                 println!();
             }
             WlMonitorEvent::Removed { name, .. } => {
-                println!("=== removed: {} ===\n", name);
+                println!("=== removed: {} ===", name);
+            }
+            WlMonitorEvent::ActionFailed { action, reason } => {
+                eprintln!("Action failed: {:?}", action);
+                eprintln!("Reason: {}", reason);
             }
         }
     }

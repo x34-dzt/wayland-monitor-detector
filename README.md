@@ -22,7 +22,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wlx_monitors = "0.1.4"
+wlx_monitors = "0.1.5"
 ```
 
 Basic usage:
@@ -101,6 +101,7 @@ Send control actions through another MPSC channel:
 - `WlMonitorAction::SwitchMode { name, width, height, refresh_rate }` - Change a monitor's mode
 - `WlMonitorAction::SetScale { name, scale }` - Set a monitor's scale factor (must be > 0, e.g., 1.0, 1.5, 2.0)
 - `WlMonitorAction::SetTransform { name, transform }` - Set a monitor's rotation/orientation (Normal, Rotate90, Rotate180, Rotate270, Flipped, etc.)
+- `WlMonitorAction::SetPosition { name, x, y }` - Set a monitor's position in the global coordinate space
 
 ### Threading Model
 
@@ -149,6 +150,7 @@ pub enum WlMonitorAction {
     SwitchMode { name: String, width: i32, height: i32, refresh_rate: i32 },
     SetScale { name: String, scale: f64 },                      // Set scale factor
     SetTransform { name: String, transform: WlTransform },       // Set rotation/flip
+    SetPosition { name: String, x: i32, y: i32 },               // Set position
 }
 ```
 
@@ -240,6 +242,13 @@ fn main() {
     action_tx.send(WlMonitorAction::SetTransform {
         name: "DP-1".to_string(),
         transform: WlTransform::Rotate90,
+    }).unwrap();
+
+    // Example: Move a monitor's position
+    action_tx.send(WlMonitorAction::SetPosition {
+        name: "HDMI-A-1".to_string(),
+        x: 1920,
+        y: 0,
     }).unwrap();
 
     // Process events

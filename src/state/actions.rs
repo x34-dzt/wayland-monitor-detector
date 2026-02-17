@@ -15,6 +15,7 @@ pub enum ActionKind {
     SwitchMode,
     SetScale,
     SetTransform,
+    SetPosition,
 }
 
 /// Events emitted by the Wayland monitor manager
@@ -63,6 +64,15 @@ pub enum WlMonitorAction {
         name: String,
         /// The desired transform
         transform: WlTransform,
+    },
+    /// Set a monitor's position in the global coordinate space
+    SetPosition {
+        /// Name of the monitor to configure (e.g., "DP-1")
+        name: String,
+        /// X coordinate in the global coordinate space
+        x: i32,
+        /// Y coordinate in the global coordinate space
+        y: i32,
     },
 }
 
@@ -116,6 +126,13 @@ impl WlMonitorManager {
                 self.configure_set_transform(
                     &config, name, transform, &qh,
                 );
+            }
+            WlMonitorAction::SetPosition {
+                ref name,
+                x,
+                y,
+            } => {
+                self.configure_set_position(&config, name, x, y, &qh);
             }
         }
 
@@ -324,6 +341,42 @@ impl WlMonitorManager {
             }
             config_head.set_position(monitor.position.x, monitor.position.y);
             config_head.set_transform(transform.to_wayland());
+            config_head.set_scale(monitor.scale);
+        }
+    }
+
+    fn configure_set_position(
+        &self,
+        config: &ZwlrOutputConfigurationV1,
+        name: &str,
+        x: i32,
+        y: i32,
+        qh: &QueueHandle<Self>,
+    ) {
+        for monitor in self.monitors.values() {
+            if monitor.name != name {
+                Self::preserve_head(config, monitor, qh);
+                continue;
+            }
+
+            if !monitor.enabled {
+                Self::preserve_head(config, monitor, qh);
+                let _ = self.emitter.send(WlMonitorEvent::ActionFailed {
+                    action: ActionKind::SetPosition,
+                    reason: format!(
+                        "Monitor '{}' is disabled, cannot set position",
+                        name
+                    ),
+                });
+                continue;
+            }
+
+            let config_head = config.enable_head(&monitor.head, qh, ());
+            if let Some(ref current_mode) = monitor.current_mode {
+                config_head.set_mode(current_mode);
+            }
+            config_head.set_position(x, y);
+            config_head.set_transform(monitor.transform.to_wayland());
             config_head.set_scale(monitor.scale);
         }
     }

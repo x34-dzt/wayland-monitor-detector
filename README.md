@@ -3,6 +3,7 @@
 A Rust library for detecting and managing display outputs on Wayland using the `wlr-output-management` protocol.
 
 [![Crates.io](https://img.shields.io/crates/v/wlx_monitors)](https://crates.io/crates/wlx_monitors)
+[![Downloads](https://img.shields.io/crates/d/wlx_monitors)](https://crates.io/crates/wlx_monitors)
 [![Documentation](https://docs.rs/wlx_monitors/badge.svg)](https://docs.rs/wlx_monitors)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 

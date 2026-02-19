@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-02-19
+
+### Toggle Extension
+
+- Added a position parameter in toggle action, to allow you to toggle a monitor at a specific position
+
+```rust
+Toggle {
+        /// Name of the monitor to toggle (e.g., "DP-1")
+        name: String,
+        /// Optional custom mode: (width, height, refresh_rate)
+        mode: Option<(i32, i32, i32)>,
+        /// Optional position to set when enabling: (x, y)
+        position: Option<(i32, i32)>,
+    },
+```
+
 ## [0.1.6] - 2026-02-19
 
 ### Added

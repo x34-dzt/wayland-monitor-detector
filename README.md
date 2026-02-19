@@ -23,7 +23,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wlx_monitors = "0.1.5"
+wlx_monitors = "0.1.7"
 ```
 
 Basic usage:
@@ -36,25 +36,25 @@ fn main() {
     // Create channels for event communication
     let (event_tx, event_rx) = mpsc::sync_channel(16);
     let (action_tx, action_rx) = mpsc::sync_channel(16);
-    
+
     // Connect to Wayland
     let (manager, event_queue) = WlMonitorManager::new_connection(
-        event_tx, 
+        event_tx,
         action_rx
     ).expect("Failed to connect to Wayland");
-    
+
     // Run the event loop in a separate thread
     std::thread::spawn(move || {
         manager.run(event_queue).expect("Event loop error");
     });
-    
+
     // Process monitor events
     while let Ok(event) = event_rx.recv() {
         match event {
             WlMonitorEvent::InitialState(monitors) => {
                 println!("Detected {} monitors", monitors.len());
                 for monitor in monitors {
-                    println!("  {} - {}x{}", 
+                    println!("  {} - {}x{}",
                         monitor.name,
                         monitor.resolution.width,
                         monitor.resolution.height
@@ -98,7 +98,7 @@ The library sends events through an MPSC channel:
 
 Send control actions through another MPSC channel:
 
-- `WlMonitorAction::Toggle { name, mode }` - Enable/disable a monitor by name. The `mode: Option<(i32, i32, i32)>` lets users optionally specify a custom `(width, height, refresh_rate)` when toggling a monitor back on. If `None`, the smart mode resolution kicks in (last mode > preferred > first available).
+- `WlMonitorAction::Toggle { name, mode, Position }` - Enable/disable a monitor by name. The `mode: Option<(i32, i32, i32)>` lets users optionally specify a custom `(width, height, refresh_rate)` when toggling a monitor back on. If `None`, the smart mode resolution kicks in (last mode > preferred > first available). The `position: Option<(i32, i32)>` let's you specify a custom position `(pos_x, pos_y)` for your monitor when turning it on, If `None` it will by default to (0,0).
 - `WlMonitorAction::SwitchMode { name, width, height, refresh_rate }` - Change a monitor's mode
 - `WlMonitorAction::SetScale { name, scale }` - Set a monitor's scale factor (must be > 0, e.g., 1.0, 1.5, 2.0)
 - `WlMonitorAction::SetTransform { name, transform }` - Set a monitor's rotation/orientation (Normal, Rotate90, Rotate180, Rotate270, Flipped, etc.)
@@ -115,7 +115,7 @@ Send control actions through another MPSC channel:
          │                                   │
          │          actions                   │
          └────────────────────────────────────┘
-         
+
 ┌─────────────────┐
 │ Event Loop      │
 │ (Separate       │
@@ -147,7 +147,7 @@ pub enum WlMonitorEvent {
 
 ```rust
 pub enum WlMonitorAction {
-    Toggle { name: String, mode: Option<(i32, i32, i32)> },    // On/off with optional custom mode
+    Toggle { name: String, mode: Option<(i32, i32, i32)>, position: Option<(i32, i32)> }, // On/off with optional custom mode and position
     SwitchMode { name: String, width: i32, height: i32, refresh_rate: i32 },
     SetScale { name: String, scale: f64 },                      // Set scale factor
     SetTransform { name: String, transform: WlTransform },       // Set rotation/flip
@@ -159,19 +159,19 @@ pub enum WlMonitorAction {
 
 Each `WlMonitor` provides:
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `name` | `String` | Output name (e.g., "DP-1", "HDMI-A-1") |
-| `description` | `String` | Human-readable description |
-| `make` | `String` | Manufacturer |
-| `model` | `String` | Model name |
-| `serial_number` | `String` | Serial number |
-| `enabled` | `bool` | Currently enabled? |
-| `resolution` | `WlResolution` | Current resolution (width, height) |
-| `position` | `WlPosition` | Position in global coordinate space |
-| `scale` | `f64` | Scale factor (1.0, 1.5, 2.0, etc.) |
-| `modes` | `Vec<WlMonitorMode>` | Available display modes |
-| `transform` | `WlTransform` | Orientation (normal, rotated, flipped) |
+| Property        | Type                 | Description                            |
+| --------------- | -------------------- | -------------------------------------- |
+| `name`          | `String`             | Output name (e.g., "DP-1", "HDMI-A-1") |
+| `description`   | `String`             | Human-readable description             |
+| `make`          | `String`             | Manufacturer                           |
+| `model`         | `String`             | Model name                             |
+| `serial_number` | `String`             | Serial number                          |
+| `enabled`       | `bool`               | Currently enabled?                     |
+| `resolution`    | `WlResolution`       | Current resolution (width, height)     |
+| `position`      | `WlPosition`         | Position in global coordinate space    |
+| `scale`         | `f64`                | Scale factor (1.0, 1.5, 2.0, etc.)     |
+| `modes`         | `Vec<WlMonitorMode>` | Available display modes                |
+| `transform`     | `WlTransform`        | Orientation (normal, rotated, flipped) |
 
 ## Requirements
 
@@ -207,23 +207,24 @@ use std::thread;
 fn main() {
     let (event_tx, event_rx) = mpsc::sync_channel(16);
     let (action_tx, action_rx) = mpsc::sync_channel(16);
-    
+
     let (manager, event_queue) = WlMonitorManager::new_connection(
-        event_tx, 
+        event_tx,
         action_rx
     ).unwrap();
-    
+
     // Spawn event loop
     thread::spawn(move || {
         manager.run(event_queue).unwrap();
     });
-    
+
     // Example: Toggle a monitor
     action_tx.send(WlMonitorAction::Toggle {
         name: "DP-1".to_string(),
         mode: None,
+        position: None.
     }).unwrap();
-    
+
     // Example: Switch resolution
     action_tx.send(WlMonitorAction::SwitchMode {
         name: "HDMI-A-1".to_string(),
@@ -256,8 +257,8 @@ fn main() {
     while let Ok(event) = event_rx.recv() {
         match event {
             WlMonitorEvent::Changed(monitor) => {
-                println!("Updated: {} - enabled={}", 
-                    monitor.name, 
+                println!("Updated: {} - enabled={}",
+                    monitor.name,
                     monitor.enabled
                 );
             }
@@ -272,6 +273,7 @@ fn main() {
 ### "Failed to connect to Wayland"
 
 Make sure you're running on a Wayland session:
+
 ```bash
 echo $WAYLAND_DISPLAY
 # Should output something like "wayland-1"

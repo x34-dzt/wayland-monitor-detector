@@ -11,8 +11,7 @@ use std::{
 };
 
 use wayland_client::{
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
-    backend::ObjectId,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, backend::ObjectId,
     protocol::wl_registry,
 };
 use wayland_protocols_wlr::output_management::v1::client::{

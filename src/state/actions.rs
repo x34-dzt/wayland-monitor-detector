@@ -39,6 +39,8 @@ pub enum WlMonitorAction {
         name: String,
         /// Optional custom mode: (width, height, refresh_rate)
         mode: Option<(i32, i32, i32)>,
+        /// Optional position to set when enabling: (x, y)
+        position: Option<(i32, i32)>,
     },
     /// Switch a monitor to a specific mode
     SwitchMode {
@@ -95,8 +97,12 @@ impl WlMonitorManager {
         let config = manager.create_configuration(serial, &qh, ());
 
         match action {
-            WlMonitorAction::Toggle { ref name, mode } => {
-                self.configure_toggle(&config, name, &qh, mode);
+            WlMonitorAction::Toggle {
+                ref name,
+                mode,
+                position,
+            } => {
+                self.configure_toggle(&config, name, &qh, mode, position);
             }
             WlMonitorAction::SwitchMode {
                 ref name,
@@ -113,25 +119,16 @@ impl WlMonitorManager {
                     &qh,
                 );
             }
-            WlMonitorAction::SetScale {
-                ref name,
-                scale,
-            } => {
+            WlMonitorAction::SetScale { ref name, scale } => {
                 self.configure_set_scale(&config, name, scale, &qh);
             }
             WlMonitorAction::SetTransform {
                 ref name,
                 transform,
             } => {
-                self.configure_set_transform(
-                    &config, name, transform, &qh,
-                );
+                self.configure_set_transform(&config, name, transform, &qh);
             }
-            WlMonitorAction::SetPosition {
-                ref name,
-                x,
-                y,
-            } => {
+            WlMonitorAction::SetPosition { ref name, x, y } => {
                 self.configure_set_position(&config, name, x, y, &qh);
             }
         }
@@ -157,6 +154,7 @@ impl WlMonitorManager {
         name: &str,
         qh: &QueueHandle<Self>,
         mode: Option<(i32, i32, i32)>,
+        position: Option<(i32, i32)>,
     ) {
         let target_enabled = self
             .monitors
@@ -207,7 +205,12 @@ impl WlMonitorManager {
             if let Some(target_mode) = resolved_mode {
                 let head = config.enable_head(&monitor.head, qh, ());
                 head.set_mode(&target_mode.proxy);
-                head.set_position(monitor.position.x, monitor.position.y);
+                let (pos_x, pos_y) = if let Some((x, y)) = position {
+                    (x, y)
+                } else {
+                    (monitor.position.x, monitor.position.y)
+                };
+                head.set_position(pos_x, pos_y);
                 head.set_transform(monitor.transform.to_wayland());
                 head.set_scale(monitor.scale);
             } else {

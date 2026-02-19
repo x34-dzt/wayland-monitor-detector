@@ -1,7 +1,5 @@
 use wayland_client::{
-    backend::ObjectId,
-    protocol::wl_output::Transform,
-    WEnum,
+    WEnum, backend::ObjectId, protocol::wl_output::Transform,
 };
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_head_v1::ZwlrOutputHeadV1,
